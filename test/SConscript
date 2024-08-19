@@ -1,0 +1,8 @@
+Import('env')
+
+test_parse_response_runner = env.CreateUnityTestRunner(
+    source='test_parse_response.c',
+    libs=env['LIBS'],
+)
+
+Return('test_parse_response_runner')

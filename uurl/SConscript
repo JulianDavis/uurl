@@ -1,0 +1,12 @@
+Import('env')
+
+libuurl = env.StaticLibrary(
+    target='uurl',
+    source=[
+        'http_header.c',
+        'http_parse.c',
+        'http_token.c',
+    ],
+)
+
+Return('libuurl')

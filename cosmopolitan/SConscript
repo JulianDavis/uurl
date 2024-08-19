@@ -1,0 +1,13 @@
+Import('env')
+
+libcosmohttparsemsg = env.StaticLibrary(
+    target='cosmohttparsemsg',
+    source=[
+        'net/http/khttptoken.c',
+        'net/http/khttprepeatable.c',
+        'net/http/gethttpheader.c',
+        'net/http/parsehttpmessage.c',
+    ],
+)
+
+Return('libcosmohttparsemsg')
