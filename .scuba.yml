@@ -1,4 +1,4 @@
-image: ghcr.io/juliandavis/c-build:latest
+image: ghcr.io/juliandavis/c-build:1.0.0
 
 aliases:
   uurl:
