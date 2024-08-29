@@ -39,7 +39,7 @@ for build_env in build_envs:
     build_env.Install('${STAGING_DIR}', libcosmohttparsemsg)
 
 # Setup test environment
-cosmo_test_env = host_env.Clone(
+cosmo_test_env = cosmo_env.Clone(
     tools=['env_test', 'create_unity_test_runner'],
 )
 cosmo_test_env.Append(

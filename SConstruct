@@ -16,9 +16,6 @@ uurl_env.Append(
     CPPPATH=[
         '#uurl',
     ],
-    CCFLAGS=[
-        '-Wno-sign-compare', # This is needed for http_parse.c
-    ]
 )
 
 # Setup build environments
@@ -44,7 +41,7 @@ uurl_test_env.Append(
         '#uurl',
     ],
     LIBS=[
-        'libuurl',
+        'uurl',
     ],
     LIBPATH=[
         '${STAGING_ROOT}/x86_64-linux/debug/'

@@ -5,15 +5,14 @@ def generate(env) -> None:
         MODE = 'test'
     )
 
-    env.SetDefault(
-        OPTCFLAGS=[
-            '-g'
-        ],
+    env.AppendUnique(
+        CFLAGS=['-Wno-missing-prototypes']
     )
 
-    env.AppendUnique(CFLAGS=['-Wno-missing-prototypes'])
-
     env.Append(
+        CFLAGS=[
+            '-g'
+        ],
         CPPDEFINES={
             'TEST': None,
         },

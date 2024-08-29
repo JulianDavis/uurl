@@ -4,13 +4,13 @@ from pathlib import Path
 from SCons.Action import Action
 from SCons.Builder import Builder
 
-def generate_runner(env, source, extra_sources=[], libs=[]):
+def generate_runner(env, test_src, target=None, other_src=[], libs=[]):
     # HACK: Save the source so I can use this same path later when building the runner
-    source_c = source
+    source_c = test_src
 
     runner_c = env.Command(
-        target = str(Path(source).with_suffix('.runner.c')),
-        source = source,
+        target = str(Path(test_src).with_suffix('.runner.c')),
+        source = test_src,
         action = Action(
             '${UNITY_GENERATE_TEST_RUNNER} ${SOURCE} ${TARGET}',
             '${UNITYCOMSTR}'
@@ -28,12 +28,12 @@ def generate_runner(env, source, extra_sources=[], libs=[]):
         ]
     )
     runner = env.Program(
-        target = str(Path(source).with_suffix('.runner')),
+        target = str(Path(test_src).with_suffix('.runner')),
         source=[
             source_c,
             runner_c,
             unity_o,
-            extra_sources,
+            other_src,
         ],
         LIBS=libs,
     )
