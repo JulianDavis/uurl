@@ -15,67 +15,167 @@
 │ PERFORMANCE OF THIS SOFTWARE.                                                │
 ╚─────────────────────────────────────────────────────────────────────────────*/
 
-#include <strings.h>
-#include <stdint.h>
-#include <limits.h>
-#include <stdlib.h>
-#include <ctype.h>
-#include <stdio.h>
 #include <assert.h>
+#include <ctype.h>
+#include <errno.h>
+#include <limits.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdarg.h>
 
-#include "http.h"
 #include "debug.h"
+#include "http.h"
+#include "gcc_attributes.h"
 
-#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
-#define __SWAPBE64(x) (x)
-#else
-#define __SWAPBE64(x) __builtin_bswap64(x)
-#endif
-
-
-#define READ64BE(P)                    \
-    (__extension__({                     \
-        uint64_t __x;                      \
-        __builtin_memcpy(&__x, P, 64 / 8); \
-        __SWAPBE64(__x);                   \
-    }))
-
-/**
- * Initializes HTTP message parser.
- */
-void http_msg_init(struct HttpMessage *r, int type) {
-    assert(type == kHttpRequest || type == kHttpResponse);
-    bzero(r, sizeof(*r));
-    r->type = type;
-}
-
-/**
- * Destroys HTTP message parser.
- */
-void http_msg_free(struct HttpMessage *r) {
-    if (r->xheaders.headers) {
-      free(r->xheaders.headers);
-      r->xheaders.headers = NULL;
-      r->xheaders.count = 0;
-    }
-}
-
-enum state {
-    STATE_START,
-    STATE_METHOD,
-    STATE_URI,
-    STATE_VERSION,
-    STATE_STATUS,
-    STATE_MESSAGE,
-    STATE_NAME,
-    STATE_COLON,
-    STATE_VALUE,
-    STATE_CR,
-    STATE_LF1,
-    STATE_LF2,
+// RFC7230 § 2.6
+PACKED struct http_version {
+    char name[4]; // "HTTP"
+    char slash;
+    char major;
+    char dot;
+    char minor;
 };
+#define HTTP_VERSION_LEN sizeof(struct http_version)
 
+#define TO_DECIMAL(ch) ((ch) - '0')
 
+#define HTTP_STATUS_MIN 100
+#define HTTP_STATUS_MAX 999
+
+#define CHAR_IS_CRLF(c)          ((c) == '\r' || (c) == '\n')
+#define CHAR_IS_CRLF_OR_SPACE(c) ((c) == '\r' || (c) == '\n' || (c) == ' ')
+#define CHAR_IS_HTAB_OR_SPACE(c) ((c) == '\t' || (c) == ' ')
+#define CHAR_IS_ISO_8859_1(c)    (((c) >= 0x20 && (c) <= 0x7E) || ((c) >= 0xA0 && (c) <= 0xFF))
+
+#define DEBUG_PRINT_INVALID_TOKEN(ch)      debug_print("Invalid token: '%c' [0x%hhx]\n", ch, ch)
+#define DEBUG_PRINT_INVALID_ISO_8859_1(ch) debug_print("Invalid ISO-8859-1: '%c' [0x%hhx]\n", ch, ch);
+
+// Append the current character to the response status
+static bool status_append(struct http_message *msg)
+{
+    if (!isdigit(msg->parser.ch)) {
+        debug_print("bad status: '%c' [0x%hhx] is not a digit\n", msg->parser.ch, msg->parser.ch);
+        return false;
+    }
+
+    msg->status *= 10;
+    msg->status += TO_DECIMAL(msg->parser.ch);
+
+    if (msg->status > HTTP_STATUS_MAX) {
+        debug_print("bad status: %u > %u\n", msg->status, HTTP_STATUS_MAX);
+        return false;
+    }
+
+    return true;
+}
+
+// Don't call this directly, call xheaders_insert instead and let it grow when needed.
+static bool xheaders_grow(struct http_xheaders *xheaders)
+{
+    if (!xheaders) {
+        debug_print("bad args: xheaders is null\n");
+        return false;
+    }
+
+    // Double the capacity
+    uint32_t capacity_new = xheaders->capacity == 0 ? 1 : xheaders->capacity * 2;
+
+    size_t size_new = capacity_new * sizeof(*xheaders->headers);
+    struct http_header *headers_temp = realloc(xheaders->headers, size_new);
+    if (!headers_temp) {
+        debug_print("realloc: [%d] %m\n", errno);
+        return false;
+    }
+
+    xheaders->headers = headers_temp;
+    xheaders->capacity = capacity_new;
+    return true;
+}
+
+// Insert an x-header, growing the buffer if necessary
+static bool xheaders_insert(struct http_message *msg)
+{
+    if (msg->xheaders.count == msg->xheaders.capacity) {
+        if (!xheaders_grow(&msg->xheaders))
+            return false;
+    }
+    if (msg->xheaders.count < msg->xheaders.capacity) {
+        msg->xheaders.headers[msg->xheaders.count].name = msg->parser.tmp.header;
+        msg->xheaders.headers[msg->xheaders.count].value.start = msg->parser.cursor;
+        msg->xheaders.headers[msg->xheaders.count].value.end = msg->parser.tmp.i;
+        ++msg->xheaders.count;
+        return true;
+    }
+    return false;
+}
+
+// Check if a header entry is already populated
+static bool header_exists(struct http_message *msg, enum http_headers header)
+{
+    if (header == HTTP_HEADERS_UNKNOWN)
+        return false;
+    return msg->headers[header].start != 0;
+}
+
+// Everything in the HTTP version scheme is case specific and exact.
+static enum http_versions parse_version(struct http_message *msg)
+{
+    size_t version_len = msg->parser.i - msg->parser.cursor;
+    if (version_len != HTTP_VERSION_LEN)
+        return HTTP_VERSION_UNKNOWN;
+
+    const char *input_src = msg->parser.args.input + msg->parser.cursor;
+    struct http_version version = { 0 };
+    memcpy(&version, input_src, sizeof(version));
+
+    if (strncmp(version.name, "HTTP", 4) != 0)
+        return HTTP_VERSION_UNKNOWN;
+    if (version.slash != '/' || version.dot != '.')
+        return HTTP_VERSION_UNKNOWN;
+    if (!isdigit(version.major) || !isdigit(version.minor))
+        return HTTP_VERSION_UNKNOWN;
+
+    if (version.major == '0' && version.minor == '9')
+        return HTTP_VERSION_0_9;
+    if (version.major == '1' && version.minor == '0')
+        return HTTP_VERSION_1_0;
+    if (version.major == '1' && version.minor == '1')
+        return HTTP_VERSION_1_1;
+
+    return HTTP_VERSION_UNKNOWN;
+}
+
+static char get_current_char(struct http_message *msg)
+{
+    return msg->parser.args.input[msg->parser.i];
+}
+
+// Insert the current character into the method buffer
+static bool insert_method_char(struct http_message *msg)
+{
+    if (msg->parser.method_i == HTTP_METHOD_MAX_STRLEN) {
+        debug_print("[ERR] method is too long\n");
+        return false;
+    }
+    if (!http_is_token(msg->parser.ch)) {
+        DEBUG_PRINT_INVALID_TOKEN(msg->parser.ch);
+        return false;
+    }
+
+    msg->method[msg->parser.method_i++] = toupper(get_current_char(msg));
+    return true;
+}
+
+// Set the parser's temporary index to point to the current input character then move it to the left if there's any
+// space or HTAB. The cursor should be set to point to the beginning of the value to trim before calling this.
+static void set_tmp_i_to_input_rtrim(struct http_message *msg)
+{
+    msg->parser.tmp.i = msg->parser.i;
+    while (msg->parser.tmp.i > msg->parser.cursor && (CHAR_IS_HTAB_OR_SPACE(msg->parser.args.input[msg->parser.tmp.i - 1])))
+        --msg->parser.tmp.i;
+}
 
 /**
  * Parses HTTP request or response.
@@ -91,6 +191,8 @@ enum state {
  * codes are present in message fields, with the exception of tab.
  * Please note that fields like kHttpStateUri may use UTF-8 percent encoding.
  * This parser doesn't care if you choose ASA X3.4-1963 or MULTICS newlines.
+ *
+ * ISO-8859-1 https://en.wikipedia.org/wiki/ISO/IEC_8859-1#Code_page_layout
  *
  * kHttpRepeatable defines which standard header fields are O(1) and
  * which ones may have comma entries spilled over into xheaders. For
@@ -110,394 +212,226 @@ enum state {
  * @see HTTP/1.1 RFC2616 RFC2068
  * @see HTTP/1.0 RFC1945
  */
-int http_msg_parse(struct HttpMessage *msg, const char *input, size_t max_size, size_t capacity) {
-    if (max_size > capacity) {
-        printf("ERR: The max size is larger than the capacity: %zu > %zu\n", max_size, capacity);
+int http_msg_parse(struct http_message *msg, const char * const input, const size_t input_size, const size_t input_capacity) {
+    if (input_size > input_capacity) {
+        debug_print("ERR: The max size is larger than the capacity: %zu > %zu\n", input_size, input_capacity);
         return -1;
     }
 
-    max_size = max_size > SHRT_MAX ? SHRT_MAX : max_size;
-    capacity = capacity > SHRT_MAX ? SHRT_MAX : capacity;
+    if (msg->type != HTTP_MESSAGE_TYPE_REQUEST && msg->type != HTTP_MESSAGE_TYPE_RESPONSE) {
+        debug_print("Unrecognized HTTP message type: %u\n", msg->type);
+        return -1;
+    }
 
-    int curr_char, h, i;
-    for (; msg->i < max_size; ++msg->i) {
-        // Get the first character, cast as an int for faster operations?
-        curr_char = input[msg->i] & 0xff;
+    msg->parser.args.input = input;
+    msg->parser.args.input_size = input_size > SHRT_MAX ? SHRT_MAX : input_size;
+    msg->parser.args.input_capacity = input_capacity > SHRT_MAX ? SHRT_MAX : input_capacity;
 
+    for (; msg->parser.i < msg->parser.args.input_size; ++msg->parser.i) {
+        msg->parser.ch = get_current_char(msg);
 
-      // Switch on the current state of the message
-      switch (msg->state) {
-        // Start state
-        //
-        // The first state:
-        //  * Consumes any leading CR or LF
-        //  * Asserts that the current char is a valid token
-        //  * Sets the state depending on the message type.
+        switch (msg->parser.state) {
         case STATE_START:
-          if (curr_char == '\r' || curr_char == '\n')
-            break;  // RFC7230 § 3.5
+            if (CHAR_IS_CRLF(msg->parser.ch))
+                break;  // RFC7230 § 3.5
+            msg->parser.cursor = msg->parser.i;
 
-          if (!g_http_token[curr_char]) {
-            printf("Invalid token: '%c' [0x%hhx]\n", curr_char, curr_char);
-            return -1;
-          }
+            if (msg->type == HTTP_MESSAGE_TYPE_REQUEST) {
+                msg->parser.state = STATE_METHOD;
+                if (!insert_method_char(msg))
+                    return -1;
+            } else /* msg->type == HTTP_MESSAGE_TYPE_RESPONSE */ {
+                msg->parser.state = STATE_VERSION;
+            }
+            break;
 
-          if (msg->type == kHttpRequest) {
-            msg->state = kHttpStateMethod;
-            msg->method = toupper(curr_char);
-            msg->cursor = 8;
-          } else {
-            // kHttpResponse
-            msg->state = kHttpStateVersion;
-            msg->cursor = msg->i; // Set msg->a to point to the index of the 'H' in HTTP/1.X
-          }
-          break;
-
-        // Method state
-        //
-        // Consume up to 8 valid HTTP tokens, breaking on whitespace
-        //
-        // JD-NOTE: cursor is being reused here when shifting "characters" into the uint64_t. Just keep cursor as += 1 and
-        //          multiply the shift by 8 instead...
-        //
-        // Get the upper case ASCII value of each method character then left shift 8-bits for each byte that has already
-        // been OR'd, then OR the shifted result into the uint64_t method field.
         case STATE_METHOD:
-          for (;;) {
-            if (curr_char == ' ') {
-              msg->cursor = msg->i + 1;
-              msg->state = kHttpStateUri;
-              break;
-            } else if (msg->cursor == 64 || !g_http_token[curr_char]) {
-              printf("Invalid token: '%c' [0x%hhx]    (or in valid method?)\n", curr_char, curr_char);
-              return -1;
+            if (msg->parser.ch == ' ') {
+                // This cursor placed here acts like an anchor to point to the start of the URI
+                msg->parser.cursor = msg->parser.i + 1;
+                msg->parser.state = STATE_URI;
+            } else if (!insert_method_char(msg)) {
+                debug_print("insert_method_char\n");
+                return -1;
             }
-            curr_char = toupper(curr_char);
-            msg->method |= (uint64_t)curr_char << msg->cursor;
-            msg->cursor += 8;
-            if (++msg->i == max_size)
-              break;
-            curr_char = input[msg->i] & 0xff;
-          }
-          break;
+            break;
 
-        // URI state
-        //
-        // Iterate through all valid tokens until whitespace is encountered, then:
-        //  * Assert that the URI isn't empty
-        //  * Point the start of the URI to the cursor and the end of the URI to the current character which will always be either
-        //    SP, CR, or LF
-        //  * Check if a version was provided and parse it if so, otherwise default to HTTP 0.9
         case STATE_URI:
-          for (;;) {
-            if (curr_char == ' ' || curr_char == '\r' || curr_char == '\n') {
-              if (msg->i == msg->cursor)
+            if (CHAR_IS_CRLF_OR_SPACE(msg->parser.ch)) {
+                if (msg->parser.i == msg->parser.cursor) {
+                    debug_print("[ERR] empty uri\n");
+                    return -1;
+                }
+                msg->uri.start = msg->parser.cursor;
+                msg->uri.end = msg->parser.i;
+                if (msg->parser.ch == ' ') {
+                    msg->parser.cursor = msg->parser.i + 1;
+                    msg->parser.state = STATE_VERSION;
+                } else {
+                    // HTTP/0.9 lacks a version
+                    msg->version = HTTP_VERSION_0_9;
+                    msg->parser.state = msg->parser.ch == '\r' ? STATE_CR : STATE_LF1;
+                }
+            } else if (!CHAR_IS_ISO_8859_1(msg->parser.ch)) {
+                DEBUG_PRINT_INVALID_ISO_8859_1(msg->parser.ch);
                 return -1;
-              msg->uri.slice_start = msg->cursor;
-              msg->uri.slice_end = msg->i;
-              if (curr_char == ' ') {
-                msg->cursor = msg->i + 1;
-                msg->state = kHttpStateVersion;
-              } else {
-                msg->version = 9;
-                msg->state = curr_char == '\r' ? kHttpStateCr : kHttpStateLf1;
-              }
-              break;
-            } else if (curr_char < 0x20 || (0x7F <= curr_char && curr_char < 0xA0)) {
-              printf("Invalid ISO-8859-1: '%c' [0x%hhx]\n", curr_char, curr_char);
-              return -1;
             }
-            if (++msg->i == max_size)
-              break;
-            curr_char = input[msg->i] & 0xff;
-          }
-          break;
+            break;
 
-        // Version state
-        //
-        // When we enter this state we keep iterating over the stream until we receive our first whitespace character. As
-        // soon as we do we then assert all of the following:
-        //  * We've read exactly 8 bytes
-        //  * The version matches "HTTP/*.*" where the wildcards can be anything but everything else is an exact match
-        //  * The 5th and 7th index characters of "HTTP/*.*", the wildcards, are digits
-        //
-        // If all of these assertions are passed then:
-        //  * Convert the 5th index, the major version, from ASCII to decimal, and multiply it by 10
-        //  * Convert the 6th index, the minor version, from ASCII to decimal
-        //  * Add the two values together and store them in msg->version
-        //    - HTTP/1.0 == msg->version == 10
-        //    - HTTP/1.1 == msg->version == 11
-        //
-        // Once finished with asserting and parsing the version:
-        //  * If this was a request and the current character is a CR then we go into the CR state otherwise we assume it
-        //    must be a LF and go into the LF1 state.
-        //  * If this was a response then we go into the status state
         case STATE_VERSION:
-          // Check if we've read whitespace
-          if (curr_char == ' ' || curr_char == '\r' || curr_char == '\n') {
-            if (msg->i - msg->cursor == 8 &&
-                // Read a 64-bit big endian value of the ASCII "HTTP/X.X" where the X's are masked out
-                // Then compare this against 0x485454502F002E00 which is ASCII "HTTP/\0.\0"
-                (READ64BE(input + msg->cursor) & 0xFFFFFFFFFF00FF00) == 0x485454502F002E00 &&
-                isdigit(input[msg->cursor + 5]) && isdigit(input[msg->cursor + 7])) {
-              msg->version = (input[msg->cursor + 5] - '0') * 10 + (input[msg->cursor + 7] - '0');
-              if (msg->type == kHttpRequest) {
-                msg->state = curr_char == '\r' ? kHttpStateCr : kHttpStateLf1;
-              } else {
-                msg->state = kHttpStateStatus;
-              }
-            } else {
-              return -1;
-            }
-          }
-          break;
+            if (CHAR_IS_CRLF_OR_SPACE(msg->parser.ch)) {
+                enum http_versions version = parse_version(msg);
+                if (version == HTTP_VERSION_UNKNOWN) {
+                    debug_print("[ERR] unable to parse version\n");
+                    return -1;
+                }
+                msg->version = version;
 
-        // Status state
-        //
-        // This function will mutate the index and current character. This function does not validate the status beyond
-        // that it's within the range of 100-999
-        //
-        // Begin by iterating over each character while checking for whitespace. If we get whitespace and haven't yet
-        // parsed a valid status value then we exit with a critical failure.
-        //
-        // * If we get whitespace and our status has already been boundary checked:
-        //  - SP: change to message state
-        //  - CR: change to CR state
-        //  - LF: change to LF state
-        // * A response message is optional and not required.
-        //
-        // * Otherwise, if the current character is anything in the range of 0-9 ASCII:
-        //    - Multiply msg->status by 10 to shift the decimal to the right to make space for our new digit
-        //    - Convert the current character from ASCII to decimal
-        //    - Add the current character as a decimal value to the msg->status
-        //    - Check if we've parsed more than 3 digits and if so exit with a critical failure
-        //
-        // * Any other character results in an exit with a critical failure
+                if (msg->type == HTTP_MESSAGE_TYPE_REQUEST) {
+                    msg->parser.state = msg->parser.ch == '\r' ? STATE_CR : STATE_LF1;
+                } else {
+                    msg->parser.state = STATE_STATUS;
+                }
+            }
+            break;
+
         case STATE_STATUS:
-          for (;;) {
-            if (curr_char == ' ' || curr_char == '\r' || curr_char == '\n') {
-              if (msg->status < 100)
-                return -1;
+            // Keep getting the next character and try appending it to the status until you're finished
+            if (CHAR_IS_CRLF_OR_SPACE(msg->parser.ch)) {
+                // We've finished parsing the status, now check that it's below the minimum for a valid status code.
+                if (msg->status < HTTP_STATUS_MIN) {
+                    debug_print("bad status: %u < %u\n", msg->status, HTTP_STATUS_MIN);
+                    return -1;
+                }
 
-              if (curr_char == ' ') {
-                // BUG: Could this possibly point past the buffer? We're blindly indexing deeper without checking.
-                msg->cursor = msg->i + 1; // Point the cursor to the next character, whatever it may be doesn't really matter
-                msg->state = kHttpStateMessage;
-              } else {
-                msg->state = curr_char == '\r' ? kHttpStateCr : kHttpStateLf1;
-              }
-              break;
-            } else if ('0' <= curr_char && curr_char <= '9') {
-              msg->status *= 10; // shift to the left
-              msg->status += curr_char - '0'; // add the decimal value
-
-              // We've looped enough times to parse 3 digits, anything past this is an error
-              if (msg->status > 999) {
+                // Any trailing whitespace means there could be an optional status message, otherwise parse the CRLF
+                if (msg->parser.ch == ' ') {
+                    // BUG: Could this possibly point past the buffer? We're blindly indexing deeper without checking.
+                    msg->parser.cursor = msg->parser.i + 1;
+                    msg->parser.state = STATE_MESSAGE;
+                } else {
+                    msg->parser.state = msg->parser.ch == '\r' ? STATE_CR : STATE_LF1;
+                }
+            } else if (!status_append(msg)) {
+                debug_print("status_append\n");
                 return -1;
-              }
-            } else {
-              return -1;
             }
-            if (++msg->i == max_size)
-              break;
-            curr_char = input[msg->i] & 0xff;
-          }
-          break;
+            break;
 
-        // Message state
-        //
-        // Optional status message that follows the response status value
-        //
-        // This function will mutate the index and current character.
-        //
-        // If we get a CR or LF then we assume we've reached the end of the message.
-        //  * Set the message to point at the current cursor.
-        //    - The cursor begins at whatever was one character past the status. The response message must be encoded as
-        //      ISO-8859-1 https://en.wikipedia.org/wiki/ISO/IEC_8859-1#Code_page_layout
-        //  * Set the message end to point at the current character, this will always be either a CR or LF
-        //
-        // Then update the state:
-        //  * CR: change to CR state
-        //  * LF: change to LF1 state
         case STATE_MESSAGE:
-          for (;;) {
-            if (curr_char == '\r' || curr_char == '\n') {
-              msg->message.slice_start = msg->cursor;
-              // This points at the character that trails the last character of the string, in this case it will always be
-              // either \r or \n
-              msg->message.slice_end = msg->i;
-              // JD-NOTE: I think instead of this going to LF1 state it should be failing with a critical error. Same goes
-              //          for everywhere else this is being done. I can't find anything in the RFC that says it's okay to
-              //          have just a LF and no CR.
-              msg->state = curr_char == '\r' ? kHttpStateCr : kHttpStateLf1;
-              break;
-            } else if (curr_char < 0x20 || (0x7F <= curr_char && curr_char < 0xA0)) {
-              printf("Invalid ISO-8859-1: '%c' [0x%hhx]\n", curr_char, curr_char);
-              return -1;
+            if (CHAR_IS_CRLF(msg->parser.ch)) {
+                msg->message.start = msg->parser.cursor;
+                msg->message.end = msg->parser.i;
+                msg->parser.state = msg->parser.ch == '\r' ? STATE_CR : STATE_LF1;
+            } else if (!CHAR_IS_ISO_8859_1(msg->parser.ch)) {
+                DEBUG_PRINT_INVALID_ISO_8859_1(msg->parser.ch);
+                return -1;
             }
-            if (++msg->i == max_size)
-              break;
-            curr_char = input[msg->i] & 0xff;
-          }
-          break;
+            break;
 
-        // CR state
-        //
-        // We only enter this state when we received a CR. This asserts that the CR was immediately followed by a LF.
         case STATE_CR:
-          if (curr_char != '\n') {
-            return -1;
-          }
-          msg->state = kHttpStateLf1;
-          break;
+            if (msg->parser.ch != '\n') {
+                debug_print("expected LF, got '%c' [0x%hhx]\n", msg->parser.ch, msg->parser.ch);
+                return -1;
+            }
+            msg->parser.state = STATE_LF1;
+            break;
 
-        // LF1 state
-        //
-        // We only enter this state after we received a CR and a LF.
-        // If the current character is a CR then we go to LF2 state.
-        //
-        // If the current character is:
-        //  * CR: change to LF2 state
-        //  * LF: return the number of bytes parsed, I don't know why...
-        //  * Invalid token: exit with a critical failure
-        //  * Valid token: point the start of the key to the current index and change to the name state
-        //
         // "Although the line terminator for the start-line and header fields is the sequence CRLF, a recipient MAY
-        // recognize a single LF as a line terminator and ignore any preceding CR." (RFC7230 §3.5)
+        // recognize a single LF as a line terminator and ignore any preceding CR."
+        // RFC7230 §3.5
+        //
         // JD-NOTE: Maybe add a lenient mode to toggle support for this?
         case STATE_LF1:
-          if (curr_char == '\r') {
-            msg->state = kHttpStateLf2;
+            if (msg->parser.ch == '\r') {
+                msg->parser.state = STATE_LF2;
+                break;
+            } else if (msg->parser.ch == '\n') {
+                return ++msg->parser.i;
+            } else if (!http_is_token(msg->parser.ch)) {
+                // 1. Forbid empty header name (RFC2616 §2.2)
+                // 2. Forbid line folding (RFC7230 §3.2.4)
+                DEBUG_PRINT_INVALID_TOKEN(msg->parser.ch);
+                return -1;
+            }
+            msg->parser.tmp.header.start = msg->parser.i;
+            msg->parser.state = STATE_NAME;
             break;
-          } else if (curr_char == '\n') {
-            return ++msg->i;
-          } else if (!g_http_token[curr_char]) {
-            // 1. Forbid empty header name (RFC2616 §2.2)
-            // 2. Forbid line folding (RFC7230 §3.2.4)
-            return -1;
-          }
-          msg->key.slice_start = msg->i;
-          msg->state = kHttpStateName;
-          break;
 
-        // Name state
-        //
-        // Name is the key for any key value pair
-        //    [Name][Colon][Value]
-        //
-        // Keep iterating until you receive:
-        //  * Colon: mark the end of the name at current index and change to the colon state
-        //  * Invalid token: exit with a critical failure
-        //  * Valid token: continue
         case STATE_NAME:
-          for (;;) {
-            if (curr_char == ':') {
-              msg->key.slice_end = msg->i;
-              msg->state = kHttpStateColon;
-              break;
-            } else if (!g_http_token[curr_char]) {
-              return -1;
+            if (msg->parser.ch == ':') {
+                msg->parser.tmp.header.end = msg->parser.i;
+                msg->parser.state = STATE_COLON;
+            } else if (!http_is_token(msg->parser.ch)) {
+                DEBUG_PRINT_INVALID_TOKEN(msg->parser.ch);
+                return -1;
             }
-            if (++msg->i == max_size)
-              break;
-            curr_char = input[msg->i] & 0xff;
-          }
-          break;
-
-        // Colon state
-        //
-        // Colon is the delimeter for any key value pair
-        //  * [Name][Colon][Value]
-        //
-        // Iterate until you get anything that isn't a SP or HTAB. Once you do then set the cursor to the current index
-        // and fallthrough to the value state
-        case STATE_COLON:
-          if (curr_char == ' ' || curr_char == '\t')
             break;
-          msg->cursor = msg->i;
-          msg->state = kHttpStateValue;
-          // fallthrough
 
-        // Value state
-        //
-        // Value is the value for any key value pair
-        //  * [Name][Colon][Value]
-        //
-        // This function will mutate the index and current character.
-        //
-        // Iterate all valid tokens until a CR or LF is found, then:
-        //  * Right-trim any SP or HTAB
-        //  * Attempt to lookup the key in a hashmap and if found it returns the index of that key in the headers field.
-        //    If the lookup results in an index and there header isn't already populated or the header isn't repeatable
-        //    then set the beginning and end and you're done.
-        //  * Otherwise it checks if the xheaders.headers buf needs to grow by 2x
-        //  * Then it checks if there is space in xheaders.headers to add the new header
-        //
+        case STATE_COLON:
+            if (CHAR_IS_HTAB_OR_SPACE(msg->parser.ch))
+                break;
+
+            msg->parser.cursor = msg->parser.i;
+            msg->parser.state = STATE_VALUE;
+            // fallthrough
         case STATE_VALUE:
-          for (;;) {
-            if (curr_char == '\r' || curr_char == '\n') {
-              i = msg->i;
-              // Right trim
-              while (i > msg->cursor && (input[i - 1] == ' ' || input[i - 1] == '\t'))
-                --i;
-              if ((h = http_header_lookup(input + msg->key.slice_start)) != -1 &&
-                  (!msg->headers[h].slice_start || !http_header_is_repeatable((enum http_headers)h))) {
-                msg->headers[h].slice_start = msg->cursor;
-                msg->headers[h].slice_end = i;
-              } else {
-                if (msg->xheaders.count == msg->xheaders.capacity) {
-                  unsigned tmp_capacity;
-                  struct HttpHeader *tmp_headers1, *tmp_headers_2;
-                  tmp_headers1 = msg->xheaders.headers;
-                  tmp_capacity = msg->xheaders.capacity;
-                  if (tmp_capacity == 0) {
-                    tmp_capacity = 1;
-                  } else {
-                    tmp_capacity = tmp_capacity * 2;
-                  }
-                  if ((tmp_headers_2 = realloc(tmp_headers1, tmp_capacity * sizeof(*tmp_headers1)))) {
-                    msg->xheaders.headers = tmp_headers_2;
-                    msg->xheaders.capacity = tmp_capacity;
-                  }
-                }
-                if (msg->xheaders.count < msg->xheaders.capacity) {
-                  msg->xheaders.headers[msg->xheaders.count].key = msg->key;
-                  msg->xheaders.headers[msg->xheaders.count].value.slice_start = msg->cursor;
-                  msg->xheaders.headers[msg->xheaders.count].value.slice_end = i;
-                  msg->xheaders.headers = msg->xheaders.headers; // JD-NOTE: wtf is this?
-                  ++msg->xheaders.count;
-                }
-              }
-              msg->state = curr_char == '\r' ? kHttpStateCr : kHttpStateLf1;
-              break;
-            }
-            if ((curr_char < 0x20 && curr_char != '\t') || (0x7F <= curr_char && curr_char < 0xA0)) {
-              printf("Invalid ISO-8859-1: '%c' [0x%hhx]\n", curr_char, curr_char);
-              return -1;
-            }
-            if (++msg->i == max_size)
-              break;
-            curr_char = input[msg->i] & 0xff;
-          }
-          break;
+            if (CHAR_IS_CRLF(msg->parser.ch)) {
+                set_tmp_i_to_input_rtrim(msg);
 
-        // LF2 state
-        //
-        // We only enter this state after we received a CRLF and another CR.
-        // If the current character is a LF then return the number of bytes parsed, anything else is a critical error.
+                enum http_headers header = http_header_lookup(msg->parser.args.input + msg->parser.tmp.header.start);
+                if (header == HTTP_HEADERS_UNKNOWN || (header_exists(msg, header) && http_header_is_repeatable(header))) {
+                    if (!xheaders_insert(msg))
+                        return -1;
+                } else {
+                    msg->headers[header].start = msg->parser.cursor;
+                    msg->headers[header].end = msg->parser.tmp.i;
+                }
+
+                msg->parser.state = msg->parser.ch == '\r' ? STATE_CR : STATE_LF1;
+            } else if (msg->parser.ch != '\t' && !CHAR_IS_ISO_8859_1(msg->parser.ch)) {
+                DEBUG_PRINT_INVALID_ISO_8859_1(msg->parser.ch);
+                return -1;
+            }
+            break;
+
         case STATE_LF2:
-          if (curr_char == '\n') {
-            return ++msg->i;
-          }
-          return -1;
+            if (msg->parser.ch == '\n')
+                return ++msg->parser.i;
+
+            debug_print("expected LF, got '%c' [0x%hhx]\n", msg->parser.ch, msg->parser.ch);
+            return -1;
 
         default:
-          __builtin_unreachable();
-      }
+            __builtin_unreachable();
+        }
     }
-    if (msg->i < capacity) {
-      return 0;
+
+    if (msg->parser.i < msg->parser.args.input_capacity) {
+        return 0;
     } else {
-      return -1;
+        return -1;
     }
+}
+
+// Initializes HTTP message parser.
+void http_msg_init(struct http_message *msg, enum http_message_types type)
+{
+    assert(type == HTTP_MESSAGE_TYPE_REQUEST || type == HTTP_MESSAGE_TYPE_RESPONSE);
+    memset(msg, '\0', sizeof(*msg));
+    msg->type = type;
+}
+
+// Destroys HTTP message parser.
+void http_msg_free(struct http_message *msg)
+{
+    if (!msg)
+        return;
+
+    if (!msg->xheaders.headers)
+        return;
+
+    free(msg->xheaders.headers);
+    msg->xheaders.headers = NULL;
+    msg->xheaders.count = 0;
 }

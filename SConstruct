@@ -39,6 +39,7 @@ uurl_test_env = host_env.Clone(
 uurl_test_env.Append(
     CPPPATH=[
         '#uurl',
+        '#test',
     ],
     LIBS=[
         'uurl',
@@ -49,10 +50,10 @@ uurl_test_env.Append(
 )
 
 # Build test runner
-uurl_parse_runner = uurl_test_env.SConscript(
+uurl_parse_response_runner, uurl_parse_request_runner = uurl_test_env.SConscript(
     'test/SConscript',
     variant_dir='${BUILD_DIR}',
     duplicate=False,
     exports={'env': uurl_test_env},
 )
-uurl_test_env.Install('${STAGING_DIR}/uurl', uurl_parse_runner)
+uurl_test_env.Install('${STAGING_DIR}/uurl', [uurl_parse_response_runner, uurl_parse_request_runner])

@@ -17,6 +17,7 @@
 #define _GNU_SOURCE
 #include <stdbool.h>
 #include <string.h>
+#include <stdlib.h>
 
 #include "http.h"
 
@@ -56,6 +57,7 @@
  * @note `grep ':.*#' rfc2616`
  * @see RFC7230 § 4.2
  */
+// TODO: Rename and make this private?
 bool http_header_is_repeatable(enum http_headers header)
 {
     static const bool repeatable_header[HTTP_HEADERS_MAX] = {
@@ -279,5 +281,42 @@ enum http_headers http_header_lookup(const char *str)
   if (strncasecmp("CDN-Loop", str, 8) == 0)
       return HTTP_HEADERS_CDN_LOOP;
 
-  return -1;
+  return HTTP_HEADERS_UNKNOWN;
+}
+
+static char *http_slice_new(const char *src, struct http_slice s)
+{
+    size_t slice_len = s.end - s.start;
+    const char *slice_start = src + s.start;
+
+    char *slice = malloc(slice_len + 1); // +1 for null terminator
+    if (!slice)
+        return NULL;
+
+    memcpy(slice, slice_start, slice_len);
+    slice[slice_len] = '\0';
+    return slice;
+}
+
+char *http_header_get_xheader_value(struct http_message *msg, const char *xheader)
+{
+    if (!msg)
+        return NULL;
+
+    if (!xheader)
+        return NULL;
+
+    for (size_t i = 0; i < msg->xheaders.count; i++) {
+        uint16_t start = msg->xheaders.headers[i].name.start;
+        uint16_t end = msg->xheaders.headers[i].name.end;
+        size_t len = end - start;
+
+        const char *name = msg->parser.args.input + start;
+        if (strncasecmp(xheader, name, len) != 0)
+            continue;
+
+        return http_slice_new(msg->parser.args.input, msg->xheaders.headers[i].value);
+    }
+
+    return NULL;
 }

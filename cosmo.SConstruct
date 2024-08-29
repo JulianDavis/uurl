@@ -47,6 +47,7 @@ cosmo_test_env.Append(
         'TEST_COSMO_PARSE': None,
     },
     CPPPATH=[
+        '#test',
         '#cosmopolitan',
         '#cosmopolitan/net/http',
     ],
@@ -56,10 +57,10 @@ cosmo_test_env.Append(
 )
 
 # Build test runner
-cosmo_parse_runner = cosmo_test_env.SConscript(
+cosmo_parse_response_runner, cosmo_parse_request_runner = cosmo_test_env.SConscript(
     'test/SConscript',
     variant_dir='${BUILD_DIR}',
     duplicate=False,
     exports={'env': cosmo_test_env},
 )
-cosmo_test_env.Install('${STAGING_DIR}/cosmo', cosmo_parse_runner)
+cosmo_test_env.Install('${STAGING_DIR}/cosmo', [cosmo_parse_response_runner, cosmo_parse_request_runner])
