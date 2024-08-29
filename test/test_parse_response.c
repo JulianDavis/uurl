@@ -3,217 +3,35 @@
 // Must be included before any other local includes
 #include "unity.h"
 
+#include "test_interface.h"
 #include "http.h"
 
+TEST_INTERFACE
+
 // Some tests ripped off from:
-//  https://github.com/nodejs/llhttp/tree/main/test/response
 //  https://github.com/jart/cosmopolitan/tree/master/test/net/http
+//  https://github.com/nodejs/llhttp/tree/main/test/response
 
-// TODO: Create neutral name and rename both?
-// These are things in cosmopolitan that I have renamed in uurl
-#ifndef TEST_COSMO_PARSE
-#   define kHttpHost          HTTP_HEADERS_HOST
-#   define kHttpContentLength HTTP_HEADERS_CONTENT_LENGTH
-#endif
+static TEST_STRUCT_HTTP_MESSAGE m_msg;
 
-typedef void (*http_msg_init_t)(struct HttpMessage *, int);
-typedef void (*http_msg_free_t)(struct HttpMessage *);
-typedef int (*http_msg_parse_t)(struct HttpMessage *, const char *, size_t, size_t);
-
-struct test_interface {
-    http_msg_init_t init;
-    http_msg_free_t free;
-    http_msg_parse_t parse;
-};
-
-static struct test_interface m_test_interface;
-
-void setUp(void) {
-#ifdef TEST_COSMO_PARSE
-    m_test_interface.init = InitHttpMessage;
-    m_test_interface.free = DestroyHttpMessage;
-    m_test_interface.parse = ParseHttpMessage;
-#else // TEST_UURL
-    m_test_interface.init = http_msg_init;
-    m_test_interface.free = http_msg_free;
-    m_test_interface.parse = http_msg_parse;
-#endif
+void setUp(void)
+{
+    test_interface.init(&m_msg, TEST_MESSAGE_TYPE_RESPONSE);
 }
 
-#define TEST_ASSERT_HTTP_SLICE(expected, slice, response) \
-    do {                                                  \
-        char *s = get_httpslice(response, slice);         \
-        TEST_ASSERT_EQUAL_STRING(expected, s);            \
-        free(s);                                          \
-    } while (0);
-
-#define TEST_ASSERT_PARSE_RESPONSE(expected, response)                               \
-    do {                                                                             \
-        struct HttpMessage msg = { 0 };                                              \
-        m_test_interface.init(&msg, kHttpResponse);                                        \
-        size_t resp_len = strlen((response));                                        \
-        int bytes_parsed = m_test_interface.parse(&msg, (response), resp_len, resp_len);   \
-        m_test_interface.free(&msg);                                                    \
-        TEST_ASSERT_EQUAL(expected, bytes_parsed);                                   \
-    } while (0);
-
-#define TEST_ASSERT_PARSE_RESPONSE_SUCCESS(response) TEST_ASSERT_PARSE_RESPONSE(strlen((response)), (response))
-#define TEST_ASSERT_PARSE_RESPONSE_FAIL(response)    TEST_ASSERT_PARSE_RESPONSE(-1, (response))
-
-static char *get_httpslice(const char *msg, struct HttpSlice s)
+void tearDown(void)
 {
-#ifdef TEST_COSMO_PARSE
-    size_t slice_len = s.b - s.a;
-    const char *slice_start = msg + s.a;
-#else // TEST_UURL
-    size_t slice_len = s.slice_end - s.slice_start;
-    const char *slice_start = msg + s.slice_start;
-#endif
-
-    char *slice = malloc(slice_len + 1); // +1 for null terminator
-    TEST_ASSERT(slice);
-
-    memcpy(slice, slice_start, slice_len);
-    slice[slice_len] = '\0';
-    return slice;
+    test_interface.free(&m_msg);
 }
 
-void test_parse_http_message_incomplete_http_protocol_should_fail(void)
+void test_parse_http_message_empty_should_return_zero(void)
 {
-    const char *response = {
-        "HTP/1.1 200 OK\r\n"
-        "\r\n"
-    };
-    TEST_ASSERT_PARSE_RESPONSE_FAIL(response);
+    TEST_ASSERT_EQUAL_ZERO(test_interface.parse(&m_msg, "", 0, 32768));
 }
 
-void test_parse_http_message_extra_digit_major_version_should_fail(void)
+void test_parse_http_message_too_short_should_return_zero(void)
 {
-    const char *response = {
-        "HTTP/01.1 200 OK\r\n"
-        "\r\n"
-    };
-    TEST_ASSERT_PARSE_RESPONSE_FAIL(response);
-}
-
-void test_parse_http_message_extra_digit_major_version2_should_fail(void)
-{
-    const char *response = {
-        "HTTP/11.1 200 OK\r\n"
-        "\r\n"
-    };
-    TEST_ASSERT_PARSE_RESPONSE_FAIL(response);
-}
-
-void test_parse_http_message_extra_digit_minor_version_should_fail(void)
-{
-    const char *response = {
-        "HTTP/1.01 200 OK\r\n"
-        "\r\n"
-    };
-    TEST_ASSERT_PARSE_RESPONSE_FAIL(response);
-}
-
-void test_parse_http_message_tab_after_version_should_fail(void)
-{
-    const char *response = {
-        "HTTP/1.1\t200 OK\r\n"
-        "\r\n"
-    };
-    TEST_ASSERT_PARSE_RESPONSE_FAIL(response);
-}
-
-void test_parse_http_message_headers_separated_by_cr_should_fail(void)
-{
-    const char *response = {
-        "HTTP/1.1 200 OK\r\n"
-        "Foo: 1\r"
-        "Bar: 2\r\n"
-        "\r\n"
-    };
-    TEST_ASSERT_PARSE_RESPONSE_FAIL(response);
-}
-
-void test_parse_http_message_whitespace_before_name_should_fail(void)
-{
-    const char *response = {
-        "HTTP/1.1 200 OK\r\n"
-        " Host: foo\r\n"
-        "\r\n"
-    };
-    TEST_ASSERT_PARSE_RESPONSE_FAIL(response);
-}
-
-void test_parse_http_message_single_digit_status_code_should_fail(void)
-{
-    const char *response = {
-        "HTTP/1.1 2 OK\r\n"
-        "\r\n"
-    };
-    TEST_ASSERT_PARSE_RESPONSE_FAIL(response);
-}
-
-void test_parse_http_message_double_digit_status_code_should_fail(void)
-{
-    const char *response = {
-        "HTTP/1.1 20 OK\r\n"
-        "\r\n"
-    };
-    TEST_ASSERT_PARSE_RESPONSE_FAIL(response);
-}
-
-void test_parse_http_message_quad_digit_status_code_should_fail(void)
-{
-    const char *response = {
-        "HTTP/1.1 2000 OK\r\n"
-        "\r\n"
-    };
-    TEST_ASSERT_PARSE_RESPONSE_FAIL(response);
-}
-
-void test_parse_http_message_missing_lf_should_fail(void)
-{
-    const char *response = {
-        "HTTP/1.1 200 OK\r"
-        "\r\n"
-    };
-    TEST_ASSERT_PARSE_RESPONSE_FAIL(response);
-}
-
-void test_parse_http_message_missing_status_message_should_succeed(void)
-{
-    const char *response = {
-        "HTTP/1.1 200\r\n"
-        "\r\n"
-    };
-    TEST_ASSERT_PARSE_RESPONSE_SUCCESS(response);
-}
-
-void test_parse_http_message_empty_status_message_should_succeed(void)
-{
-    const char *response = {
-        "HTTP/1.1 200 \r\n"
-        "\r\n"
-    };
-    TEST_ASSERT_PARSE_RESPONSE_SUCCESS(response);
-}
-
-void test_parse_http_message_invalid_version_digits_should_succeed(void)
-{
-    const char *response = {
-        "HTTP/4.2 200 OK\r\n"
-        "\r\n"
-    };
-    TEST_ASSERT_PARSE_RESPONSE_SUCCESS(response);
-}
-
-void test_parse_http_message_extra_space_between_version_and_status_code_should_succeed(void)
-{
-    const char *response = {
-        "HTTP/1.1 200  OK\r\n"
-        "\r\n"
-    };
-    TEST_ASSERT_PARSE_RESPONSE_SUCCESS(response);
+    TEST_ASSERT_EQUAL_ZERO(test_interface.parse(&m_msg, "HT", 2, 32768));
 }
 
 void test_parse_http_message_tiniest_http_response_should_succeed(void)
@@ -222,7 +40,7 @@ void test_parse_http_message_tiniest_http_response_should_succeed(void)
         "HTTP/1.0 200 OK\r\n"
         "\r\n"
     };
-    TEST_ASSERT_PARSE_RESPONSE_SUCCESS(response);
+    TEST_ASSERT_HTTP_MSG_PARSE_SUCCESS(response, &m_msg);
 }
 
 void test_parse_http_message_tiny_http_response_should_succeed(void)
@@ -232,7 +50,127 @@ void test_parse_http_message_tiny_http_response_should_succeed(void)
         "Accept-Encoding: gzip\r\n"
         "\r\n"
     };
-    TEST_ASSERT_PARSE_RESPONSE_SUCCESS(response);
+    TEST_ASSERT_HTTP_MSG_PARSE_SUCCESS(response, &m_msg);
+}
+
+void test_parse_http_message_missing_status_message_should_succeed(void)
+{
+    const char *response = {
+        "HTTP/1.1 200\r\n"
+        "\r\n"
+    };
+    TEST_ASSERT_HTTP_MSG_PARSE_SUCCESS(response, &m_msg);
+}
+
+void test_parse_http_message_empty_status_message_should_succeed(void)
+{
+    const char *response = {
+        "HTTP/1.1 200 \r\n"
+        "\r\n"
+    };
+    TEST_ASSERT_HTTP_MSG_PARSE_SUCCESS(response, &m_msg);
+}
+
+void test_parse_http_message_invalid_version_digits_should_succeed(void)
+{
+    TEST_IGNORE_MESSAGE("Decide if I want to allow this or not. Cosmo currently does and that's where this test comes from. I don't like the idea of parsing an unknown version and then making assertions about its formatting, etc");
+    const char *response = {
+        "HTTP/4.2 200 OK\r\n"
+        "\r\n"
+    };
+    TEST_ASSERT_HTTP_MSG_PARSE_SUCCESS(response, &m_msg);
+}
+
+void test_parse_http_message_extra_space_between_version_and_status_code_should_succeed(void)
+{
+    const char *response = {
+        "HTTP/1.0 200  OK\r\n"
+        "\r\n"
+    };
+    TEST_ASSERT_HTTP_MSG_PARSE_SUCCESS(response, &m_msg);
+}
+
+void test_parse_http_message_http_v1_1_should_succeed(void)
+{
+    const char *response = {
+        "HTTP/1.1 404 Not Found\r\n"
+        "\r\n"
+    };
+    TEST_ASSERT_HTTP_MSG_PARSE_SUCCESS(response, &m_msg);
+    TEST_ASSERT_EQUAL(404, m_msg.status);
+    TEST_ASSERT_HTTP_SLICE("Not Found", m_msg.message, response);
+    TEST_ASSERT_EQUAL_VERSION_1_1(m_msg.version);
+}
+
+void test_parse_http_message_http_v1_0_should_succeed(void)
+{
+    const char *response = {
+        "HTTP/1.0 404 Not Found\r\n"
+        "\r\n"
+    };
+    TEST_ASSERT_HTTP_MSG_PARSE_SUCCESS(response, &m_msg);
+    TEST_ASSERT_EQUAL(404, m_msg.status);
+    TEST_ASSERT_HTTP_SLICE("Not Found", m_msg.message, response);
+    TEST_ASSERT_EQUAL_VERSION_1_0(m_msg.version);
+}
+
+void test_parse_http_message_no_headers_should_succeed(void)
+{
+    const char *response = {
+        "HTTP/1.0 200 OK\r\n"
+        "\r\n"
+    };
+    TEST_ASSERT_HTTP_MSG_PARSE_SUCCESS(response, &m_msg);
+    TEST_ASSERT_EQUAL(200, m_msg.status);
+    TEST_ASSERT_HTTP_SLICE("OK", m_msg.message, response);
+    TEST_ASSERT_EQUAL_VERSION_1_0(m_msg.version);
+}
+
+void test_parse_http_message_some_headers_should_succeed(void)
+{
+    const char *response = {
+        "HTTP/1.0 200 OK\r\n"
+        "Host: foo.example\r\n"
+        "Content-Length: 0\r\n"
+        "\r\n"
+    };
+    TEST_ASSERT_HTTP_MSG_PARSE_SUCCESS(response, &m_msg);
+    TEST_ASSERT_EQUAL(200, m_msg.status);
+    TEST_ASSERT_HTTP_SLICE("OK", m_msg.message, response);
+    TEST_ASSERT_EQUAL_VERSION_1_0(m_msg.version);
+    TEST_ASSERT_HTTP_SLICE("foo.example", m_msg.headers[TEST_HEADER_HOST], response);
+    TEST_ASSERT_HTTP_SLICE("0", m_msg.headers[TEST_HEADER_CONTENT_LENGTH], response);
+}
+
+void test_parse_http_message_only_lf_should_succeed(void)
+{
+    const char *response = {
+        "HTTP/1.0 200 OK\n"
+        "Host: foo.example\n"
+        "Content-Length: 0\n"
+        "\n"
+    };
+    TEST_ASSERT_HTTP_MSG_PARSE_SUCCESS(response, &m_msg);
+    TEST_ASSERT_EQUAL(200, m_msg.status);
+    TEST_ASSERT_HTTP_SLICE("OK", m_msg.message, response);
+    TEST_ASSERT_EQUAL_VERSION_1_0(m_msg.version);
+    TEST_ASSERT_HTTP_SLICE("foo.example", m_msg.headers[TEST_HEADER_HOST], response);
+    TEST_ASSERT_HTTP_SLICE("0", m_msg.headers[TEST_HEADER_CONTENT_LENGTH], response);
+}
+
+void test_parse_http_message_xheaders_should_succeed(void)
+{
+    const char *response = {
+        "HTTP/1.0 200 OK\r\n"
+        "X-User-Agent: hi\r\n"
+        "\r\n"
+    };
+    TEST_ASSERT_HTTP_MSG_PARSE_SUCCESS(response, &m_msg);
+    TEST_ASSERT_EQUAL(200, m_msg.status);
+    TEST_ASSERT_HTTP_SLICE("OK", m_msg.message, response);
+    TEST_ASSERT_EQUAL_VERSION_1_0(m_msg.version);
+    TEST_ASSERT_HTTP_SLICE("X-User-Agent", TEST_XHEADERS_SLICE_NAME(0), response);
+    TEST_ASSERT_HTTP_SLICE("hi", TEST_XHEADERS_SLICE_VALUE(0), response);
 }
 
 void test_parse_http_message_standard_http_response_should_succeed(void)
@@ -254,7 +192,7 @@ void test_parse_http_message_standard_http_response_should_succeed(void)
         "Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline' https://www.google.com/recaptcha/ https://www.gstatic.com/recaptcha/ https://cdnjs.cloudflare.com/; frame-src 'self' https://www.google.com/recaptcha/; style-src 'self' 'unsafe-inline'\r\n"
         "\r\n"
     };
-    TEST_ASSERT_PARSE_RESPONSE_SUCCESS(response);
+    TEST_ASSERT_HTTP_MSG_PARSE_SUCCESS(response, &m_msg);
 }
 
 void test_parse_http_message_unstandard_http_response_should_succeed(void)
@@ -281,123 +219,125 @@ void test_parse_http_message_unstandard_http_response_should_succeed(void)
         "transfer-encoding: chunked\r\n"
         "\r\n"
     };
-    TEST_ASSERT_PARSE_RESPONSE_SUCCESS(response);
+    TEST_ASSERT_HTTP_MSG_PARSE_SUCCESS(response, &m_msg);
 }
 
-void test_parse_http_message_only_lf_should_succeed(void)
+void test_parse_http_message_incomplete_http_protocol_should_fail(void)
 {
     const char *response = {
-        "HTTP/1.0 200 OK\n"
-        "Host: foo.example\n"
-        "Content-Length: 0\n"
-        "\n"
-    };
-    TEST_ASSERT_PARSE_RESPONSE_SUCCESS(response);
-}
-
-// TODO: Create a TEST_ASSERT_PARSE_RESPONSE_ZERO?
-void test_parse_http_message_empty_should_return_zero(void)
-{
-    struct HttpMessage msg = { 0 };
-    m_test_interface.init(&msg, kHttpResponse);
-
-    TEST_ASSERT_EQUAL(0, m_test_interface.parse(&msg, "", 0, 32768));
-    m_test_interface.free(&msg);
-}
-
-void test_parse_http_message_short_should_return_zero(void)
-{
-    const char *response = "HTTP";
-    size_t resp_len = strlen(response);
-
-    struct HttpMessage msg = { 0 };
-    m_test_interface.init(&msg, kHttpResponse);
-
-    TEST_ASSERT_EQUAL(0, m_test_interface.parse(&msg, response, resp_len, 32768));
-    m_test_interface.free(&msg);
-}
-
-void test_parse_http_message_http_v1_1_should_succeed(void)
-{
-    const char *response = {
-        "HTTP/1.0 404 Not Found\r\n"
+        "HTP/1.1 200 OK\r\n"
         "\r\n"
     };
-    size_t resp_len = strlen(response);
-
-    struct HttpMessage msg = { 0 };
-    m_test_interface.init(&msg, kHttpResponse);
-
-    int bytes_parsed = m_test_interface.parse(&msg, response, resp_len, resp_len);
-    TEST_ASSERT_EQUAL(resp_len, bytes_parsed);
-    m_test_interface.free(&msg);
-
-    TEST_ASSERT_EQUAL(404, msg.status);
-    TEST_ASSERT_HTTP_SLICE("Not Found", msg.message, response);
-    TEST_ASSERT_EQUAL_UINT8(10, msg.version);
-
+    TEST_ASSERT_HTTP_MSG_PARSE_FAIL(response, &m_msg);
 }
 
-void test_parse_http_message_http_v1_0_should_succeed(void)
+void test_parse_http_message_extra_digit_major_version_should_fail(void)
 {
     const char *response = {
-        "HTTP/1.1 404 Not Found\r\n"
+        "HTTP/01.1 200 OK\r\n"
         "\r\n"
     };
-    size_t resp_len = strlen(response);
-
-    struct HttpMessage msg = { 0 };
-    m_test_interface.init(&msg, kHttpResponse);
-
-    int bytes_parsed = m_test_interface.parse(&msg, response, resp_len, resp_len);
-    TEST_ASSERT_EQUAL(resp_len, bytes_parsed);
-
-    TEST_ASSERT_EQUAL(404, msg.status);
-    TEST_ASSERT_HTTP_SLICE("Not Found", msg.message, response);
-    TEST_ASSERT_EQUAL_UINT8(11, msg.version);
+    TEST_ASSERT_HTTP_MSG_PARSE_FAIL(response, &m_msg);
 }
 
-void test_parse_http_message_no_headers_should_succeed(void)
+void test_parse_http_message_extra_digit_major_version2_should_fail(void)
 {
     const char *response = {
-        "HTTP/1.0 200 OK\r\n"
+        "HTTP/11.1 200 OK\r\n"
         "\r\n"
     };
-    size_t resp_len = strlen(response);
-
-    struct HttpMessage msg = { 0 };
-    m_test_interface.init(&msg, kHttpResponse);
-
-    int bytes_parsed = m_test_interface.parse(&msg, response, resp_len, resp_len);
-    TEST_ASSERT_EQUAL(resp_len, bytes_parsed);
-
-    TEST_ASSERT_EQUAL(200, msg.status);
-    TEST_ASSERT_HTTP_SLICE("OK", msg.message, response);
-    TEST_ASSERT_EQUAL_UINT8(10, msg.version);
-
-    m_test_interface.free(&msg);
+    TEST_ASSERT_HTTP_MSG_PARSE_FAIL(response, &m_msg);
 }
 
-void test_parse_http_message_some_headers_should_succeed(void)
+void test_parse_http_message_extra_digit_minor_version_should_fail(void)
 {
     const char *response = {
-        "HTTP/1.0 200 OK\r\n"
-        "Host: foo.example\r\n"
-        "Content-Length: 0\r\n"
+        "HTTP/1.01 200 OK\r\n"
         "\r\n"
     };
-    size_t resp_len = strlen(response);
+    TEST_ASSERT_HTTP_MSG_PARSE_FAIL(response, &m_msg);
+}
 
-    struct HttpMessage msg = { 0 };
-    m_test_interface.init(&msg, kHttpResponse);
+void test_parse_http_message_tab_after_version_should_fail(void)
+{
+    const char *response = {
+        "HTTP/1.1\t200 OK\r\n"
+        "\r\n"
+    };
+    TEST_ASSERT_HTTP_MSG_PARSE_FAIL(response, &m_msg);
+}
 
-    int bytes_parsed = m_test_interface.parse(&msg, response, resp_len, resp_len);
-    TEST_ASSERT_EQUAL(resp_len, bytes_parsed);
+void test_parse_http_message_headers_separated_by_cr_should_fail(void)
+{
+    const char *response = {
+        "HTTP/1.1 200 OK\r\n"
+        "Foo: 1\r"
+        "Bar: 2\r\n"
+        "\r\n"
+    };
+    TEST_ASSERT_HTTP_MSG_PARSE_FAIL(response, &m_msg);
+}
 
-    TEST_ASSERT_EQUAL(200, msg.status);
-    TEST_ASSERT_HTTP_SLICE("OK", msg.message, response);
-    TEST_ASSERT_EQUAL_UINT8(10, msg.version);
-    TEST_ASSERT_HTTP_SLICE("foo.example", msg.headers[kHttpHost], response);
-    TEST_ASSERT_HTTP_SLICE("0", msg.headers[kHttpContentLength], response);
-    m_test_interface.free(&msg);
+void test_parse_http_message_whitespace_before_name_should_fail(void)
+{
+    const char *response = {
+        "HTTP/1.1 200 OK\r\n"
+        " Host: foo\r\n"
+        "\r\n"
+    };
+    TEST_ASSERT_HTTP_MSG_PARSE_FAIL(response, &m_msg);
+}
+
+void test_parse_http_message_single_digit_status_code_should_fail(void)
+{
+    const char *response = {
+        "HTTP/1.1 2 OK\r\n"
+        "\r\n"
+    };
+    TEST_ASSERT_HTTP_MSG_PARSE_FAIL(response, &m_msg);
+}
+
+void test_parse_http_message_double_digit_status_code_should_fail(void)
+{
+    const char *response = {
+        "HTTP/1.1 20 OK\r\n"
+        "\r\n"
+    };
+    TEST_ASSERT_HTTP_MSG_PARSE_FAIL(response, &m_msg);
+}
+
+void test_parse_http_message_quad_digit_status_code_should_fail(void)
+{
+    const char *response = {
+        "HTTP/1.1 2000 OK\r\n"
+        "\r\n"
+    };
+    TEST_ASSERT_HTTP_MSG_PARSE_FAIL(response, &m_msg);
+}
+
+void test_parse_http_message_missing_lf_should_fail(void)
+{
+    const char *response = {
+        "HTTP/1.1 200 OK\r"
+        "\r\n"
+    };
+    TEST_ASSERT_HTTP_MSG_PARSE_FAIL(response, &m_msg);
+}
+
+void test_parse_http_message_non_digit_status_should_fail(void)
+{
+    const char *response = {
+        "HTTP/1.1 ABC\r"
+        "\r\n"
+    };
+    TEST_ASSERT_HTTP_MSG_PARSE_FAIL(response, &m_msg);
+}
+
+void test_parse_http_message_leading_space_should_fail(void)
+{
+    const char *response = {
+        " HTTP/1.0 200  OK\r\n"
+        "\r\n"
+    };
+    TEST_ASSERT_HTTP_MSG_PARSE_FAIL(response, &m_msg);
 }

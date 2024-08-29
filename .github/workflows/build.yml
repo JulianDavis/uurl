@@ -1,0 +1,17 @@
+name: Build and Test
+
+on: push
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    container: ghcr.io/juliandavis/c-build:1.0.0
+
+    steps:
+    - uses: actions/checkout@v4
+    - name: build uurl
+      run: scons -j$(nproc)
+    - name: test uurl
+      run: |
+        valgrind -q build/bin/x86_64-linux/test/uurl/test_parse_response.runner
+        valgrind -q build/bin/x86_64-linux/test/uurl/test_parse_request.runner

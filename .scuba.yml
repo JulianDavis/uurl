@@ -1,10 +1,16 @@
-image: ghcr.io/juliandavis/c-build:latest
+image: ghcr.io/juliandavis/c-build:1.0.0
 
 aliases:
-  build-uurl: scons -j$(nproc)
-  test-uurl: valgrind build/bin/x86_64-linux/test/uurl/test_parse_response.runner
+  uurl:
+    script:
+      - scons -j$(nproc)
+      - valgrind -q build/bin/x86_64-linux/test/uurl/test_parse_response.runner
+      - valgrind -q build/bin/x86_64-linux/test/uurl/test_parse_request.runner
 
-  build-cosmo: scons -f cosmo.SConstruct -j$(nproc)
-  test-cosmo: valgrind build/bin/x86_64-linux/test/cosmo/test_parse_response.runner
+  cosmo:
+    script:
+      - scons -f cosmo.SConstruct -j$(nproc)
+      - valgrind -q build/bin/x86_64-linux/test/cosmo/test_parse_response.runner
+      - valgrind -q build/bin/x86_64-linux/test/cosmo/test_parse_request.runner
 
   clean: if [ -d build ]; then rm -r build; fi;

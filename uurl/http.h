@@ -5,63 +5,27 @@
 #include <stdint.h>
 #include <sys/types.h>
 
-#define kHttpRequest  0
-#define kHttpResponse 1
+// strlen of the longest possible HTTP method: "OPTIONS" or "CONNECT"
+#define HTTP_METHOD_MAX_STRLEN 7
 
-#define READ32LE(P)                        \
-    (__extension__({                       \
-        uint32_t __x;                      \
-        __builtin_memcpy(&__x, P, 32 / 8); \
-        __SWAPLE32(__x);                   \
-    }))
+// Supported HTTP message types
+enum http_message_types {
+    HTTP_MESSAGE_TYPE_UNKNOWN = -1,
+    HTTP_MESSAGE_TYPE_REQUEST,
+    HTTP_MESSAGE_TYPE_RESPONSE,
+};
 
-#define READ64LE(P)                        \
-    (__extension__({                       \
-        uint64_t __x;                      \
-        __builtin_memcpy(&__x, P, 64 / 8); \
-        __SWAPLE32(__x);                   \
-    }))
+// Supported HTTP versions
+enum http_versions {
+    HTTP_VERSION_UNKNOWN = -1,
+    HTTP_VERSION_0_9,
+    HTTP_VERSION_1_0,
+    HTTP_VERSION_1_1,
+};
 
-#define kHttpGet     READ32LE("GET")
-#define kHttpHead    READ32LE("HEAD")
-#define kHttpPost    READ32LE("POST")
-#define kHttpPut     READ32LE("PUT")
-#define kHttpDelete  READ64LE("DELETE\0")
-#define kHttpOptions READ64LE("OPTIONS")
-#define kHttpConnect READ64LE("CONNECT")
-#define kHttpTrace   READ64LE("TRACE\0\0")
-
-#define kHttpStateStart   0
-#define kHttpStateMethod  1
-#define kHttpStateUri     2
-#define kHttpStateVersion 3
-#define kHttpStateStatus  4
-#define kHttpStateMessage 5
-#define kHttpStateName    6
-#define kHttpStateColon   7
-#define kHttpStateValue   8
-#define kHttpStateCr      9
-#define kHttpStateLf1     10
-#define kHttpStateLf2     11
-
-#define kHttpClientStateHeaders      0
-#define kHttpClientStateBody         1
-#define kHttpClientStateBodyChunked  2
-#define kHttpClientStateBodyLengthed 3
-
-#define kHttpStateChunkStart   0
-#define kHttpStateChunkSize    1
-#define kHttpStateChunkExt     2
-#define kHttpStateChunkLf1     3
-#define kHttpStateChunk        4
-#define kHttpStateChunkCr2     5
-#define kHttpStateChunkLf2     6
-#define kHttpStateTrailerStart 7
-#define kHttpStateTrailer      8
-#define kHttpStateTrailerLf1   9
-#define kHttpStateTrailerLf2   10
-
+// Common HTTP headers
 enum http_headers {
+    HTTP_HEADERS_UNKNOWN = -1,
     HTTP_HEADERS_HOST,
     HTTP_HEADERS_CACHE_CONTROL,
     HTTP_HEADERS_CONNECTION,
@@ -158,50 +122,87 @@ enum http_headers {
     HTTP_HEADERS_MAX,
 };
 
-extern const char g_http_token[256];
-extern const bool g_http_repeatable_header[HTTP_HEADERS_MAX];
-
-struct HttpSlice {
-    short slice_start;
-    short slice_end;
+// State used for parsing HTTP messages
+enum http_message_parser_state {
+    STATE_START,
+    STATE_METHOD,
+    STATE_URI,
+    STATE_VERSION,
+    STATE_STATUS,
+    STATE_MESSAGE,
+    STATE_NAME,
+    STATE_COLON,
+    STATE_VALUE,
+    STATE_CR,
+    STATE_LF1,
+    STATE_LF2,
 };
 
-struct HttpHeader {
-    struct HttpSlice key;
-    struct HttpSlice value;
+struct http_slice {
+    uint16_t start;
+    uint16_t end;
 };
 
-struct HttpHeaders {
-    unsigned int count;
-    unsigned int capacity;
-    struct HttpHeader *headers;
+struct http_header {
+    struct http_slice name;
+    struct http_slice value;
 };
 
-struct HttpMessage {
-    int i;
-    int cursor;
-    int status;
-    unsigned char state;
-    unsigned char type;
-    unsigned char version;
-    uint64_t method;
-    struct HttpSlice key;
-    struct HttpSlice uri;
-    struct HttpSlice scratch;
-    struct HttpSlice message;
-    struct HttpSlice headers[HTTP_HEADERS_MAX];
-    struct HttpHeaders xheaders;
+struct http_xheaders {
+    struct http_header *headers;
+    uint32_t count;
+    uint32_t capacity;
 };
 
-struct HttpUnchunker {
-    int t;
-    size_t i;
-    size_t j;
-    ssize_t m;
+struct http_message_parser {
+    // The current state of the parser.
+    enum http_message_parser_state state;
+
+    // The index of input as each character is iterated. This is should be initialized to zero and then carry over on
+    // each call to http_msg_parse.
+    uint32_t i;
+
+    // The current character.
+    uint8_t ch;
+
+    // This is a cursor used to mark different sections of the input at different times. The cursor should be
+    // initialized to zero on every call to http_msg_parse.
+    uint32_t cursor;
+
+    // This is to track characters being inserted into the method buffer. This should never exceed
+    // HTTP_METHOD_MAX_STRLEN.
+    uint32_t method_i;
+
+    // Store the arguments that were passed to http_msg_parse.
+    struct {
+        const char *input;
+        size_t input_size;
+        size_t input_capacity;
+    } args;
+
+    // Storage for temporary values.
+    struct {
+        struct http_slice header;
+        uint32_t i;
+    } tmp ;
+};
+
+struct http_message {
+    struct http_message_parser parser;
+    enum http_message_types type;
+    char method[HTTP_METHOD_MAX_STRLEN + 1];
+    enum http_versions version;
+    struct http_slice uri;
+    uint32_t status;
+    struct http_slice message;
+    struct http_slice headers[HTTP_HEADERS_MAX];
+    struct http_xheaders xheaders;
 };
 
 enum http_headers http_header_lookup(const char *str);
-void http_msg_init(struct HttpMessage *, int);
-void http_msg_free(struct HttpMessage *);
-int http_msg_parse(struct HttpMessage *msg, const char *input, size_t max_size, size_t capacity);
+void http_msg_init(struct http_message *msg, enum http_message_types type);
+void http_msg_free(struct http_message *msg);
+int http_msg_parse(struct http_message *msg, const char *input, size_t max_size, size_t capacity);
 bool http_header_is_repeatable(enum http_headers header);
+bool http_is_token(uint8_t token);
+char *http_header_get_xheader_value(struct http_message *msg, const char *xheader);
