@@ -13,4 +13,9 @@ aliases:
       - valgrind -q build/bin/x86_64-linux/test/cosmo/test_parse_response.runner
       - valgrind -q build/bin/x86_64-linux/test/cosmo/test_parse_request.runner
 
+  server:
+    image: golang:1.23.2-bullseye
+    script:
+      - go build -o build/bin/x86_64-linux/test/server tools/server.go
+
   clean: if [ -d build ]; then rm -r build; fi;

@@ -24,13 +24,13 @@ build_envs = [uurl_env.Clone(tools=[f'mode_{mode}']) for mode in build_mode]
 
 # Build library
 for build_env in build_envs:
-    libuurl = build_env.SConscript(
+    libuurl, libuurl_test = build_env.SConscript(
         'uurl/SConscript',
         variant_dir='${BUILD_DIR}',
         duplicate=False,
         exports={'env': build_env},
     )
-    build_env.Install('${STAGING_DIR}', libuurl)
+    build_env.Install('${STAGING_DIR}', [libuurl, libuurl_test])
 
 # Setup test environment
 uurl_test_env = host_env.Clone(

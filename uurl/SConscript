@@ -6,7 +6,16 @@ libuurl = env.StaticLibrary(
         'http_header.c',
         'http_parse.c',
         'http_token.c',
+        'uurl.c',
+        'net.c',
+        'io.c',
     ],
 )
 
-Return('libuurl')
+libuurl_test = env.Program(
+    target='libuurl_test',
+    source=['test.c'],
+    LIBS=[libuurl],
+)
+
+Return('libuurl', 'libuurl_test')
